@@ -1,0 +1,9 @@
+run_docker.sh
+dataset
+.vscode
+.notifier
+*test*
+*temp*
+*.ipynb
+logs
+*checkpoints*
