@@ -1,1 +1,1 @@
-# Graph neural network-based Optimal Topology Predictor (GOTP)
+# GNN-based Optimal Topology Predictor (GOTP)
