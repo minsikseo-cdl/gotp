@@ -70,7 +70,9 @@ class GlobalModel(nn.Module):
         self.down_convs.append(
             GCNBlock(in_channels, hidden_channels, improved=True))
         for _ in range(depth):
-            self.pools.append(gnn.TopKPooling(hidden_channels, pool_ratios))
+            self.pools.append(gnn.TopKPooling(
+                hidden_channels, pool_ratios,
+                nonlinearity=getattr(nn, 'ReLU')()))
             self.down_convs.append(
                 GCNBlock(hidden_channels, hidden_channels, improved=True))
 
