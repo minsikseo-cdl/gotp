@@ -76,6 +76,61 @@ def load_dataset(prob_list, num_seq=1):
     return graphs
 
 
+def load_sequenced_dataset(prob_list, num_seq=3):
+    assert num_seq > 1
+    transform = ToUndirected()
+    graphs = []
+    for prob in prob_list:
+        path_list = list(filter(os.path.isdir, glob(f'dataset/{prob:s}/*')))
+
+        for path in tqdm(path_list):
+            # Import edge list
+            buffer = np.fromfile(os.path.join(
+                path, 'edge.bin'), dtype=np.int64)
+            edge = torch.tensor(buffer[2:].reshape(
+                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
+
+            # Import node coordinates
+            buffer = np.fromfile(os.path.join(
+                path, 'node.bin'), dtype=np.float32)
+            pos = torch.tensor(buffer[2:].reshape(
+                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
+
+            # Import element list
+            buffer = np.fromfile(os.path.join(
+                path, 'elem.bin'), dtype=np.int64)
+            face = torch.tensor(buffer[2:].reshape(
+                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
+
+            # Import input features
+            buffer = np.fromfile(os.path.join(
+                path, 'X.bin'), dtype=np.float32)
+            X = torch.tensor(buffer[2:].reshape(
+                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
+            x0 = X[:, :1]
+            umag = torch.sqrt(X[:, 1:2]**2 + X[:, 2:3]**2)
+            scale = 1 / umag.max().item()
+            umag *= scale
+            srWs = torch.sqrt(scale * X[:, -1:])
+
+            # Import output features
+            buffer = np.fromfile(os.path.join(
+                path, 'Y.bin'), dtype=np.float32)
+            Y = buffer[2:].reshape(
+                int(buffer[1].item()), int(buffer[0].item())).T
+
+            dYcum = np.r_[0, np.sqrt(np.sum((Y[:, 1:] - Y[:, :-1])**2, axis=0)).cumsum()]
+            dYcum = (dYcum - dYcum.min()) / (dYcum.max() - dYcum.min())
+            f = interp1d(dYcum, np.arange(len(dYcum)))
+            slice_idx = np.round(
+                f(np.linspace(0, 1, num_seq + 1))).astype(np.int64)
+            Y = torch.tensor(Y[:, slice_idx], dtype=torch.float32)
+            graphs.append(transform(Data(
+                x=torch.cat([x0, umag, srWs], dim=-1), y=Y[:, 1:],
+                edge_index=edge, pos=pos, face=face)))
+    return graphs
+
+
 class CosineAnnealingWarmUpRestarts(_LRScheduler):
     def __init__(self, optimizer, T_0, T_mult=1, eta_max=0.1, T_up=0, gamma=1., last_epoch=-1):
         if T_0 <= 0 or not isinstance(T_0, int):

@@ -4,8 +4,9 @@ dataset
 .notifier
 *test*
 *temp*
+*tmp*
 *.ipynb
-logs
+logs*
 *checkpoints*
 *cache*
 *.csv
