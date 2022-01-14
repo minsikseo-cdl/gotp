@@ -2,133 +2,111 @@ import os
 import math
 from glob import glob
 from tqdm import tqdm
+from joblib import Parallel, delayed
 import numpy as np
 from scipy.interpolate import interp1d
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
 from torch_geometric.data import Data
-from torch_geometric.transforms import ToUndirected
+from torch_geometric.transforms import ToUndirected, BaseTransform
 
 
-def load_dataset(prob_list, num_seq=1):
-    transform = ToUndirected()
+def load_sequenced_dataset(prob_list, num_seq=3, normalize=True, num_workers=4):
     graphs = []
+    jobs = Parallel(n_jobs=num_workers)
     for prob in prob_list:
-        path_list = list(filter(os.path.isdir, glob(f'dataset/{prob:s}/*')))
-
-        subgraphs = []
-        for path in tqdm(path_list):
-            # Import edge list
-            buffer = np.fromfile(os.path.join(
-                path, 'edge.bin'), dtype=np.int64)
-            edge = torch.tensor(buffer[2:].reshape(
-                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
-
-            # Import node coordinates
-            buffer = np.fromfile(os.path.join(
-                path, 'node.bin'), dtype=np.float32)
-            pos = torch.tensor(buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
-
-            # Import element list
-            buffer = np.fromfile(os.path.join(
-                path, 'elem.bin'), dtype=np.int64)
-            face = torch.tensor(buffer[2:].reshape(
-                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
-
-            # Import input features
-            buffer = np.fromfile(os.path.join(
-                path, 'X.bin'), dtype=np.float32)
-            X = torch.tensor(buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
-            x0 = X[:, :1]
-            umag = torch.sqrt(X[:, 1:2]**2 + X[:, 2:3]**2)
-            scale = 1 / umag.max().item()
-            umag *= scale
-            srWs = torch.sqrt(scale * X[:, -1:])
-
-            # Import output features
-            buffer = np.fromfile(os.path.join(
-                path, 'Y.bin'), dtype=np.float32)
-            Y = buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T
-
-            if num_seq == 1:
-                Y = torch.tensor(Y[:, -1:], dtype=torch.float32)
-                subgraphs.append(transform(Data(
-                    x=torch.cat([x0, umag, srWs], dim=-1), y=Y,
-                    edge_index=edge, pos=pos, face=face)))
-
-            else:
-                dYcum = np.r_[0, np.sqrt(np.sum((Y[:, 1:] - Y[:, :-1])**2, axis=0)).cumsum()]
-                dYcum = (dYcum - dYcum.min()) / (dYcum.max() - dYcum.min())
-                f = interp1d(dYcum, np.arange(len(dYcum)))
-                slice_idx = np.round(
-                    f(np.linspace(0, 1, num_seq + 1))).astype(np.int64)
-                Y = torch.tensor(Y[:, slice_idx], dtype=torch.float32)
-                for i in range(num_seq):
-                    subgraphs.append(transform(Data(
-                        x=torch.cat([Y[:, i:i+1], umag, srWs], dim=-1), y=Y[:, i+1:i+2],
-                        edge_index=edge, pos=pos, face=face)))
-
-        # Define Data
-        graphs.extend(subgraphs)
+        if os.path.isfile(f'dataset/dataset_{prob}_s{num_seq}.pkl'):
+            graphs_ = torch.load(f'dataset/dataset_{prob}_s{num_seq}.pkl')
+        else:
+            path_list = list(filter(os.path.isdir, glob(f'dataset/{prob:s}/*')))
+            graphs_ = jobs(
+                delayed(load_sequenced_data)(path, num_seq, normalize)
+                for path in tqdm(path_list, desc=f'Loading {prob}'))
+            torch.save(graphs_, f'dataset/dataset_{prob}_s{num_seq}.pkl')
+        graphs += graphs_
     return graphs
 
 
-def load_sequenced_dataset(prob_list, num_seq=3):
-    assert num_seq > 1
-    transform = ToUndirected()
-    graphs = []
-    for prob in prob_list:
-        path_list = list(filter(os.path.isdir, glob(f'dataset/{prob:s}/*')))
+def load_sequenced_data(path, num_seq, normalize):
+    # Import edge list
+    buffer = np.fromfile(os.path.join(
+        path, 'edge.bin'), dtype=np.int64)
+    edge = torch.tensor(buffer[2:].reshape(
+        buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
 
-        for path in tqdm(path_list):
-            # Import edge list
-            buffer = np.fromfile(os.path.join(
-                path, 'edge.bin'), dtype=np.int64)
-            edge = torch.tensor(buffer[2:].reshape(
-                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
+    # Import node coordinates
+    buffer = np.fromfile(os.path.join(
+        path, 'node.bin'), dtype=np.float32)
+    pos = torch.tensor(buffer[2:].reshape(
+        int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
 
-            # Import node coordinates
-            buffer = np.fromfile(os.path.join(
-                path, 'node.bin'), dtype=np.float32)
-            pos = torch.tensor(buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
+    # Import element list
+    buffer = np.fromfile(os.path.join(
+        path, 'elem.bin'), dtype=np.int64)
+    face = torch.tensor(buffer[2:].reshape(
+        buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
 
-            # Import element list
-            buffer = np.fromfile(os.path.join(
-                path, 'elem.bin'), dtype=np.int64)
-            face = torch.tensor(buffer[2:].reshape(
-                buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
+    # Import input features
+    buffer = np.fromfile(os.path.join(
+        path, 'X.bin'), dtype=np.float32)
+    X = torch.tensor(buffer[2:].reshape(
+        int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
+    umag = torch.sqrt(X[:, 1:2]**2 + X[:, 2:3]**2)
+    Ws = X[:, -1:]
 
-            # Import input features
-            buffer = np.fromfile(os.path.join(
-                path, 'X.bin'), dtype=np.float32)
-            X = torch.tensor(buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
-            x0 = X[:, :1]
-            umag = torch.sqrt(X[:, 1:2]**2 + X[:, 2:3]**2)
-            scale = 1 / umag.max().item()
-            umag *= scale
-            srWs = torch.sqrt(scale * X[:, -1:])
+    # Import output features
+    buffer = np.fromfile(os.path.join(
+        path, 'Y.bin'), dtype=np.float32)
+    Y = buffer[2:].reshape(
+        int(buffer[1].item()), int(buffer[0].item())).T
 
-            # Import output features
-            buffer = np.fromfile(os.path.join(
-                path, 'Y.bin'), dtype=np.float32)
-            Y = buffer[2:].reshape(
-                int(buffer[1].item()), int(buffer[0].item())).T
+    if num_seq == 1:
+        Y = torch.tensor(Y[:, [0, -1]], dtype=torch.float32)
+    else:
+        dYcum = np.r_[0, np.sqrt(np.sum((Y[:, 1:] - Y[:, :-1])**2, axis=0)).cumsum()]
+        dYcum = (dYcum - dYcum.min()) / (dYcum.max() - dYcum.min())
+        f = interp1d(dYcum, np.arange(len(dYcum)))
+        slice_idx = np.round(
+            f(np.linspace(0, 1, num_seq + 1))).astype(np.int64)
+        Y = torch.tensor(Y[:, slice_idx], dtype=torch.float32)
 
-            dYcum = np.r_[0, np.sqrt(np.sum((Y[:, 1:] - Y[:, :-1])**2, axis=0)).cumsum()]
-            dYcum = (dYcum - dYcum.min()) / (dYcum.max() - dYcum.min())
-            f = interp1d(dYcum, np.arange(len(dYcum)))
-            slice_idx = np.round(
-                f(np.linspace(0, 1, num_seq + 1))).astype(np.int64)
-            Y = torch.tensor(Y[:, slice_idx], dtype=torch.float32)
-            graphs.append(transform(Data(
-                x=torch.cat([x0, umag, srWs], dim=-1), y=Y[:, 1:],
-                edge_index=edge, pos=pos, face=face)))
-    return graphs
+    H = torch.cat([umag, Ws], dim=1)
+    graph = ToUndirected()(Data(
+        x=Y, h=H, edge_index=edge, pos=pos, face=face))
+    if normalize:
+        graph = NormalizeFeatures()(graph)
+    return graph
+
+
+class NormalizeFeatures(BaseTransform):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, data):
+        for store in data.stores:
+            for key, value in store.items('h'):
+                value = value - value.mean(0)
+                value.div_(value.std(0))
+                store[key] = value
+        return data
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}()'
+
+
+class NormalizeEdgeWeight(BaseTransform):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, data):
+        for store in data.stores:
+            for key, value in store.items('edge_weight'):
+                value.div_(value.norm(p=2))
+                store[key] = value
+        return data
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}()'
 
 
 class CosineAnnealingWarmUpRestarts(_LRScheduler):

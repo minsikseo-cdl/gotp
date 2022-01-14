@@ -1,43 +1,49 @@
 import random
+from datetime import timedelta
+import torch
 from argparse import ArgumentParser
 from torch_geometric.loader import DataLoader
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import (
-    LearningRateMonitor, EarlyStopping, ModelCheckpoint)
-from utils import load_dataset
-from models import HybridModel
+from pytorch_lightning.plugins import DDPPlugin
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from utils import load_sequenced_dataset
+from models import GOTPModel
 
 
-SEED = 890711
-LR_INIT = 1e-3
-LR_FACTOR = 0.8
-BATCH_SIZE = 128
+SEED = 19890711
+LR_INIT = 5e-3
+BATCH_SIZE = 8
 TRAIN_RATIO = 0.7
-MAX_EPOCHS = 100
+MAX_EPOCHS = 500
 PROBS = ['clever', 'lshape', 'arc']
 
 
-def main(train_loader=None, val_loader=None, **kwargs):
-    nseq = kwargs['num_seq']
+def main(hidden_size, num_layers, depth, heads, num_seq, lr, batch_size, schedule='cosine',
+         train_loader=None, val_loader=None, ckpt=None, max_epochs=MAX_EPOCHS):
 
-    seed_everything(SEED)
-    model = HybridModel(**kwargs)
+    model = GOTPModel(
+        hidden_size=hidden_size, num_layers=num_layers, depth=depth, heads=heads, num_seq=num_seq,
+        lr=lr, schedule=schedule, batch_size=batch_size)
+    if ckpt is not None:
+        state_dict = torch.load(ckpt)['state_dict']
+        model.load_state_dict(state_dict)
 
     trainer = Trainer(
-        max_epochs=kwargs['max_epochs'],
+        max_epochs=max_epochs,
         log_every_n_steps=10,
         num_sanity_val_steps=0,
-        gpus=1, auto_select_gpus=True,
+        gpus=2, auto_select_gpus=True,
+        strategy=DDPPlugin(find_unused_parameters=False),
         logger=TensorBoardLogger(
             default_hp_metric=False,
-            save_dir='/workspace/logs_v1.0',
-            name=f'gotp_seq{nseq}_hybrid'),
+            save_dir='/workspace/logs_v3.0',
+            name=f'gotp_n{hidden_size}_l{num_layers}_d{depth}_h{heads}_s{num_seq}'),
         callbacks=[
             LearningRateMonitor(logging_interval='epoch'),
-            EarlyStopping(monitor='loss/val', patience=10),
             ModelCheckpoint(monitor='loss/val', save_last=True)
-        ]
+        ],
+        accumulate_grad_batches=1
     )
 
     trainer.fit(
@@ -48,24 +54,27 @@ def main(train_loader=None, val_loader=None, **kwargs):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--num-seq', type=int, default=3)
-    arg = parser.parse_args()
-    num_seq = arg.num_seq
-
-    print(f'Number of sequence is {num_seq}')
+    parser.add_argument('--hidden-size', type=int, default=64)
+    parser.add_argument('--num-layers', type=int, default=3)
+    parser.add_argument('--depth', type=int, default=2)
+    parser.add_argument('--heads', type=int, default=2)
+    parser.add_argument('--lr', type=lambda x: float(x), default=LR_INIT)
+    parser.add_argument('--num-seq', type=int, default=1)
+    parser.add_argument('--schedule', type=str, default='cosine')
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
+    parser.add_argument('--max-epochs', type=int, default=MAX_EPOCHS)
+    args = parser.parse_args()
 
     seed_everything(SEED)
-    dset = load_dataset(PROBS, num_seq)
-    random.shuffle(dset, random.random)
-    num_train = int(len(dset) * TRAIN_RATIO)
-    train_dset = dset[:num_train]
-    val_dset = dset[num_train:]
-    train_loader = DataLoader(
-        train_dset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dset, batch_size=BATCH_SIZE, num_workers=4)
+    data_list = load_sequenced_dataset(PROBS, args.num_seq, num_workers=8)
+    random.shuffle(data_list, random.random)
+    num_train = int(len(data_list) * TRAIN_RATIO)
+    train_dset = data_list[:num_train]
+    val_dset = data_list[num_train:]
 
     main(
-        train_loader=train_loader, val_loader=val_loader,
-        in_channels=3, hidden_channels=64, out_channels=1,
-        local_depth=3, global_depth=9, ratio=0.5,
-        batch_size=BATCH_SIZE, num_seq=num_seq, max_epochs=100)
+        train_loader=DataLoader(
+            train_dset, batch_size=args.batch_size, shuffle=True, num_workers=4),
+        val_loader=DataLoader(val_dset, batch_size=args.batch_size, num_workers=4),
+        **vars(args)
+    )
