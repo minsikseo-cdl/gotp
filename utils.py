@@ -28,22 +28,11 @@ def load_sequenced_dataset(prob_list, num_seq=3, normalize=True, num_workers=4):
 
 
 def load_sequenced_data(path, num_seq, normalize):
+    _, prob, idx = path.split('/')
     # Import edge list
     buffer = np.fromfile(os.path.join(
         path, 'edge.bin'), dtype=np.int64)
     edge = torch.tensor(buffer[2:].reshape(
-        buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
-
-    # Import node coordinates
-    buffer = np.fromfile(os.path.join(
-        path, 'node.bin'), dtype=np.float32)
-    pos = torch.tensor(buffer[2:].reshape(
-        int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
-
-    # Import element list
-    buffer = np.fromfile(os.path.join(
-        path, 'elem.bin'), dtype=np.int64)
-    face = torch.tensor(buffer[2:].reshape(
         buffer[1].item(), buffer[0].item()) - 1, dtype=torch.long)
 
     # Import input features
@@ -51,8 +40,8 @@ def load_sequenced_data(path, num_seq, normalize):
         path, 'X.bin'), dtype=np.float32)
     X = torch.tensor(buffer[2:].reshape(
         int(buffer[1].item()), int(buffer[0].item())).T, dtype=torch.float32)
-    umag = torch.sqrt(X[:, 1:2]**2 + X[:, 2:3]**2)
-    Ws = X[:, -1:]
+    U = X[:, 1:3]
+    S = X[:, 3:6]
 
     # Import output features
     buffer = np.fromfile(os.path.join(
@@ -70,12 +59,29 @@ def load_sequenced_data(path, num_seq, normalize):
             f(np.linspace(0, 1, num_seq + 1))).astype(np.int64)
         Y = torch.tensor(Y[:, slice_idx], dtype=torch.float32)
 
-    H = torch.cat([umag, Ws], dim=1)
     graph = ToUndirected()(Data(
-        x=Y, h=H, edge_index=edge, pos=pos, face=face))
+        x=Y, u=U, s=S, edge_index=edge, prob=prob, idx=idx))
     if normalize:
         graph = NormalizeFeatures()(graph)
     return graph
+
+
+def load_mesh(prob, idx):
+    path = os.path.join('dataset', prob, idx)
+
+    # Import node coordinates
+    buffer = np.fromfile(os.path.join(
+        path, 'node.bin'), dtype=np.float32)
+    pos = torch.tensor(buffer[2:].reshape(
+        int(buffer[1].item()), int(buffer[0].item())), dtype=torch.float32)
+
+    # Import element list
+    buffer = np.fromfile(os.path.join(
+        path, 'elem.bin'), dtype=np.int64)
+    face = torch.tensor(buffer[2:].reshape(
+        buffer[1].item(), buffer[0].item()).T - 1, dtype=torch.long)
+
+    return pos, face
 
 
 class NormalizeFeatures(BaseTransform):
@@ -84,9 +90,15 @@ class NormalizeFeatures(BaseTransform):
 
     def __call__(self, data):
         for store in data.stores:
-            for key, value in store.items('h'):
-                value = value - value.mean(0)
-                value.div_(value.std(0))
+            for key, value in store.items('u', 's'):
+                if key == 'u':
+                    umag = torch.sqrt(value[:, 0]**2 + value[:, 1]**2)
+                    value.div_(umag.std())
+                elif key == 's':
+                    vs = torch.sqrt(
+                        ((value[:, 0] - value[:, 1])**2 + value[:, 0]**2 + value[:, 1]**2) / 2
+                         + 3 * value[:, 2]**2)
+                    value.div_(vs.std())
                 store[key] = value
         return data
 
