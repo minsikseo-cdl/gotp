@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch_geometric.nn import Sequential, TopKPooling, GATv2Conv
+from torch_geometric.nn import TopKPooling, GATv2Conv
 from torch_geometric.utils import add_self_loops, sort_edge_index, remove_self_loops
 from torch_geometric.loader import DataLoader
 from torch_sparse.tensor import SparseTensor
@@ -51,7 +51,7 @@ def augment_adj(edge_index, edge_weight, num_nodes):
 
 
 class GCNBlock(nn.Module):
-    def __init__(self, input_size, output_size, num_layers, heads, norm):
+    def __init__(self, input_size, hidden_size, output_size, num_layers, heads, norm):
         super().__init__()
         self.num_layers = num_layers
         self.conv = nn.ModuleList()
@@ -62,11 +62,12 @@ class GCNBlock(nn.Module):
             self.bn = None
         for i in range(num_layers):
             self.conv.append(GATv2Conv(
-                input_size if i == 0 else output_size,
-                output_size, heads=heads,
+                input_size if i == 0 else hidden_size,
+                output_size if i == num_layers - 1 else hidden_size, heads=heads,
                 concat=False, share_weights=True, bias=not norm))
             if norm:
-                self.bn.append(nn.BatchNorm1d(output_size))
+                self.bn.append(nn.BatchNorm1d(
+                    output_size if i == num_layers - 1 else hidden_size))
 
     def forward(self, x, edge_index):
         for i in range(self.num_layers):
@@ -87,24 +88,25 @@ class GOTPNet(nn.Module):
         self.depth = depth
         self.ratio = ratio
 
-        self.input = GCNBlock(input_size, hidden_size, num_layers, heads, norm=True)
+        self.input = GCNBlock(input_size, hidden_size, hidden_size, num_layers, heads, norm=True)
 
         self.down_convs = nn.ModuleList()
         self.pools = nn.ModuleList()
         for _ in range(depth):
-            self.down_convs.append(GCNBlock(hidden_size, hidden_size, num_layers, heads, norm=True))
             self.pools.append(TopKPooling(hidden_size, ratio=ratio))
+            self.down_convs.append(GCNBlock(hidden_size, hidden_size, hidden_size, num_layers, heads, norm=True))
+
+        self.conv = GCNBlock(hidden_size, hidden_size, hidden_size, num_layers, heads, norm=True)
 
         self.up_convs = nn.ModuleList()
         for _ in range(depth):
-            self.up_convs.append(GCNBlock(2 * hidden_size, hidden_size, num_layers, heads, norm=True))
+            self.up_convs.append(GCNBlock(2 * hidden_size, hidden_size, hidden_size, num_layers, heads, norm=True))
 
-        self.output = GCNBlock(hidden_size, output_size, num_layers, heads, norm=False)
+        self.output = GCNBlock(2 * hidden_size, hidden_size, output_size, num_layers, heads, norm=False)
 
     def forward(self, x, edge_index, batch=None):
         if batch is None:
             batch = edge_index.new_zeros(x.size(0))
-        edge_weight = x.new_ones(edge_index.size(1))
 
         x = torch.tanh(self.input(x, edge_index))
         xs = [x]
@@ -113,6 +115,7 @@ class GOTPNet(nn.Module):
 
         for i in range(self.depth):
             with torch.no_grad():
+                edge_weight = x.new_ones(edge_index.size(1))
                 edge_index, edge_weight = augment_adj(
                     edge_index, edge_weight, x.size(0))
                 torch.cuda.empty_cache()
@@ -121,20 +124,19 @@ class GOTPNet(nn.Module):
 
             x = torch.tanh(self.down_convs[i](x, edge_index))
 
-            if i < self.depth:
-                xs += [x]
-                edge_indices += [edge_index]
+            xs += [x]
+            edge_indices += [edge_index]
             perms += [perm]
 
+        up = torch.tanh(self.conv(x, edge_index))
+
         for i in range(self.depth):
-            j = self.depth - 1 - i
-
-            up = torch.zeros_like(xs[j])
-            up[perms[j]] = x
-
+            j = self.depth - i
             x = torch.tanh(self.up_convs[i](torch.cat((xs[j], up), dim=-1), edge_indices[j]))
+            up = torch.zeros_like(xs[j - 1])
+            up[perms[j - 1]] = x
 
-        return torch.sigmoid(self.output(x, edge_indices[0]))
+        return torch.sigmoid(self.output(torch.cat((xs[0], up), dim=-1), edge_indices[0]))
 
 
 if __name__ == '__main__':
@@ -142,7 +144,8 @@ if __name__ == '__main__':
     loader = DataLoader(data_list)
     data = next(iter(loader))
 
-    model = GOTPNet(input_size=3, hidden_size=16, output_size=1, num_layers=2, depth=3)
+    model = GOTPNet(input_size=2, hidden_size=64, output_size=1, num_layers=3, depth=2)
+    # print(model)
 
     out = torch.cat([data.x[:, :1], data.h], dim=1)
     out = model(out, data.edge_index, data.batch)

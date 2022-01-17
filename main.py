@@ -1,5 +1,4 @@
 import random
-from datetime import timedelta
 import torch
 from argparse import ArgumentParser
 from torch_geometric.loader import DataLoader
@@ -13,7 +12,7 @@ from models import GOTPModel
 
 SEED = 19890711
 LR_INIT = 5e-3
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 TRAIN_RATIO = 0.7
 MAX_EPOCHS = 500
 PROBS = ['clever', 'lshape', 'arc']
@@ -37,7 +36,7 @@ def main(hidden_size, num_layers, depth, heads, num_seq, lr, batch_size, schedul
         strategy=DDPPlugin(find_unused_parameters=False),
         logger=TensorBoardLogger(
             default_hp_metric=False,
-            save_dir='/workspace/logs_v3.0',
+            save_dir='/workspace/logs_v4.0',
             name=f'gotp_n{hidden_size}_l{num_layers}_d{depth}_h{heads}_s{num_seq}'),
         callbacks=[
             LearningRateMonitor(logging_interval='epoch'),
@@ -55,7 +54,7 @@ def main(hidden_size, num_layers, depth, heads, num_seq, lr, batch_size, schedul
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--hidden-size', type=int, default=64)
-    parser.add_argument('--num-layers', type=int, default=3)
+    parser.add_argument('--num-layers', type=int, default=2)
     parser.add_argument('--depth', type=int, default=2)
     parser.add_argument('--heads', type=int, default=2)
     parser.add_argument('--lr', type=lambda x: float(x), default=LR_INIT)
@@ -76,5 +75,6 @@ if __name__ == '__main__':
         train_loader=DataLoader(
             train_dset, batch_size=args.batch_size, shuffle=True, num_workers=4),
         val_loader=DataLoader(val_dset, batch_size=args.batch_size, num_workers=4),
+        # ckpt='/workspace/logs_v4.0/gotp_n64_l2_d2_h2_s1/version_0/checkpoints/epoch=991-step=33727.ckpt',
         **vars(args)
     )
